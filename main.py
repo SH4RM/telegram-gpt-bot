@@ -1,77 +1,65 @@
 import os
-import json
-import openai
 from flask import Flask, request
-import requests
+import openai
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-MODEL = "gpt-4o"
 
-openai.api_key = OPENAI_API_KEY
 app = Flask(__name__)
-HISTORY_PATH = 'history.json'
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-def load_history(chat_id):
-    if not os.path.exists(HISTORY_PATH):
+HISTORY_FILE = "history.json"
+
+def load_history():
+    if not os.path.exists(HISTORY_FILE):
         return []
-    with open(HISTORY_PATH, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-        return data.get(str(chat_id), [])
+    with open(HISTORY_FILE, "r") as f:
+        return json.load(f)
 
-def save_history(chat_id, history):
-    if os.path.exists(HISTORY_PATH):
-        with open(HISTORY_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    else:
-        data = {}
+def save_history(history):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f)
 
-    data[str(chat_id)] = history
-    with open(HISTORY_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
-
-def ask_gpt(history):
-    response = openai.ChatCompletion.create(
-        model=MODEL,
-        messages=history
-    )
-    return response.choices[0].message.content
-
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    if 'message' not in data:
-        return 'ok'
-    message = data['message']
-    chat_id = message['chat']['id']
-    text = message.get('text')
-
-    if not text:
-        send_message(chat_id, "Я понимаю только текст.")
-        return 'ok'
-
-    history = load_history(chat_id)
-    history.append({"role": "user", "content": text})
-
+    
+    # Получаем ID чата и текст сообщения
     try:
-        reply = ask_gpt(history)
-    except Exception as e:
-        reply = f"Ошибка: {e}"
-        send_message(chat_id, reply)
-        return 'ok'
+        chat_id = data["message"]["chat"]["id"]
+        user_message = data["message"]["text"]
+    except KeyError:
+        return "No message found", 200
 
-    history.append({"role": "assistant", "content": reply})
-    save_history(chat_id, history)
-    send_message(chat_id, reply)
-    return 'ok'
+    # Загружаем историю, добавляем новое сообщение
+    history = load_history()
+    history.append({"role": "user", "content": user_message})
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    # Ограничим до последних 10 сообщений (экономия токенов)
+    recent_history = history[-10:]
+
+    # Получаем ответ от GPT-4o (или другой выбранной модели)
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=recent_history
+    )
+
+    assistant_reply = response.choices[0].message.content
+    history.append({"role": "assistant", "content": assistant_reply})
+    save_history(history)
+
+    # Отправляем ответ обратно в Telegram
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": assistant_reply
+    }
+
+    import requests
+    requests.post(send_url, json=payload)
+
+    return "OK", 200
